@@ -11,152 +11,71 @@ jobs:
 
     steps:
 
-      # 1. Checkout application code
+      # Checkout code
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 2. Setup Node.js on GitHub Runner
+      # Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      # 3. Install production dependencies on GitHub Runner
-      - name: Install Production Dependencies
-        run: |
-          npm ci --omit=dev
+      # Install dependencies on GitHub Runner
+      - name: Install Dependencies
+        run: npm ci --omit=dev
 
-      # 4. Create production deployment package
-      - name: Create Deployment Package
+      # Create deployment package
+      - name: Create Package
         run: |
           tar -czf node-app.tar.gz \
-            --exclude=".git" \
-            --exclude=".github" \
-            --exclude="k8s" \
-            --exclude="kustomize" \
-            --exclude="Dockerfile" \
-            --exclude="docker-compose.yaml" \
-            --exclude="sonar-project.properties" \
-            --exclude="test.js" \
             app.js \
             views \
             package.json \
             package-lock.json \
             node_modules
 
-      # 5. Configure SSH
+      # Setup SSH
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-
           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key
-
           chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
-          ssh-keyscan -H "${{ secrets.EC2_HOST }}" \
-            >> ~/.ssh/known_hosts
-
-      # 6. Copy production package to EC2
-      - name: Copy Application to EC2
+      # Copy package to EC2
+      - name: Copy Application
         run: |
           scp -i ~/.ssh/ec2_key \
             node-app.tar.gz \
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/"
 
-      # 7. Install Node.js, PM2 and deploy application
+      # Deploy on EC2
       - name: Deploy to EC2
         run: |
           ssh -i ~/.ssh/ec2_key \
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" << 'EOF'
 
-          set -e
-
-          APP_DIR="/var/www/node-app"
-
-          # ---------------------------------------
           # Install Node.js
-          # ---------------------------------------
+          curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+          sudo dnf install -y nodejs
 
-          if ! command -v node >/dev/null 2>&1; then
-            curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-            sudo dnf install -y nodejs
-          fi
-
-          # ---------------------------------------
           # Install PM2
-          # ---------------------------------------
+          sudo npm install -g pm2
 
-          if ! command -v pm2 >/dev/null 2>&1; then
-            sudo npm install -g pm2
-          fi
+          # Application directory
+          sudo mkdir -p /var/www/node-app
+          sudo chown -R $USER:$USER /var/www/node-app
 
-          # ---------------------------------------
-          # Create application directory
-          # ---------------------------------------
+          # Deploy application
+          rm -rf /var/www/node-app/*
+          tar -xzf /tmp/node-app.tar.gz -C /var/www/node-app
 
-          sudo mkdir -p "$APP_DIR"
-
-          sudo chown -R "$USER:$USER" "$APP_DIR"
-
-          # ---------------------------------------
-          # Stop existing application
-          # ---------------------------------------
-
+          # Start application
+          cd /var/www/node-app
           pm2 delete node-app || true
-
-          # ---------------------------------------
-          # Clean old application
-          # ---------------------------------------
-
-          rm -rf "$APP_DIR"/*
-
-          # ---------------------------------------
-          # Extract new application
-          # ---------------------------------------
-
-          tar -xzf /tmp/node-app.tar.gz \
-            -C "$APP_DIR"
-
-          # ---------------------------------------
-          # Start application with PM2
-          # ---------------------------------------
-
-          cd "$APP_DIR"
-
-          pm2 start app.js \
-            --name node-app
-
-          # ---------------------------------------
-          # Save PM2 process list
-          # ---------------------------------------
-
+          pm2 start app.js --name node-app
           pm2 save
-
-          # ---------------------------------------
-          # Configure PM2 startup on reboot
-          # ---------------------------------------
-
-          PM2_STARTUP=$(pm2 startup systemd \
-            -u "$USER" \
-            --hp "$HOME" | grep "sudo env")
-
-          if [ -n "$PM2_STARTUP" ]; then
-            eval "$PM2_STARTUP"
-          fi
-
-          pm2 save
-
-          # ---------------------------------------
-          # Remove temporary package
-          # ---------------------------------------
-
-          rm -f /tmp/node-app.tar.gz
-
-          # ---------------------------------------
-          # Show deployment status
-          # ---------------------------------------
-
-          pm2 status
 
           EOF
