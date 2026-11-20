@@ -27,7 +27,6 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-
       # 2. Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -35,21 +34,29 @@ jobs:
           node-version: 20
           cache: npm
 
-
       # 3. Install dependencies
       - name: Install Dependencies
         run: npm ci
-
 
       # 4. Run application tests
       - name: Run Tests
         run: npm test
 
-
-      # 5. Verify AWS identity
+      # 5. Verify AWS
       - name: Verify AWS Identity
         run: |
+          echo "===== AWS IDENTITY ====="
           aws sts get-caller-identity
+
+      # 6. Verify Docker
+      - name: Verify Docker
+        run: |
+          echo "===== DOCKER VERSION ====="
+          docker --version
+
+          echo ""
+          echo "===== DOCKER STATUS ====="
+          docker info
 
 
   # ==========================================================
@@ -66,18 +73,26 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-
       # 2. Build Docker image
       - name: Build Docker Image
         run: |
           docker build \
             -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} .
 
-
-      # 3. Show image
+      # 3. Show Docker image
       - name: Show Docker Image
         run: |
-          docker images | grep ${{ env.ECR_REPOSITORY }}
+          echo "===== DOCKER IMAGE ====="
+
+          docker images | grep "${{ env.ECR_REPOSITORY }}"
+
+      # 4. Verify image
+      - name: Verify Docker Image
+        run: |
+          docker inspect \
+            ${{ env.ECR_REPOSITORY }}:${{ github.sha }} > /dev/null
+
+          echo "Docker image verified successfully."
 
 
   # ==========================================================
@@ -90,7 +105,12 @@ jobs:
 
     steps:
 
-      # 1. Login to Amazon ECR
+      # 1. Verify AWS identity
+      - name: Verify AWS Identity
+        run: |
+          aws sts get-caller-identity
+
+      # 2. Login to Amazon ECR
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password \
@@ -100,25 +120,26 @@ jobs:
             --password-stdin \
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
 
-
-      # 2. Tag image
+      # 3. Tag image
       - name: Tag Docker Image
         run: |
+          ECR_IMAGE="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+
           docker tag \
             ${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
-            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            $ECR_IMAGE
 
-
-      # 3. Push image
+      # 4. Push image
       - name: Push Docker Image to ECR
         run: |
-          docker push \
-            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          ECR_IMAGE="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
 
+          docker push "$ECR_IMAGE"
 
-      # 4. Show ECR image
+      # 5. Show ECR image
       - name: Show ECR Image
         run: |
+          echo ""
           echo "=============================================="
           echo "IMAGE PUSHED SUCCESSFULLY"
           echo "=============================================="
@@ -137,27 +158,32 @@ jobs:
 
     steps:
 
-      # 1. Configure kubectl for EKS
+      # 1. Configure kubeconfig
       - name: Configure EKS
         run: |
           aws eks update-kubeconfig \
             --region ${{ env.AWS_REGION }} \
             --name ${{ env.EKS_CLUSTER_NAME }}
 
-
       # 2. Verify EKS connection
       - name: Verify EKS Connection
         run: |
-          echo "===== EKS CLUSTER ====="
+          echo "=============================================="
+          echo "EKS CLUSTER"
+          echo "=============================================="
+
           kubectl cluster-info
 
           echo ""
-          echo "===== NODES ====="
-          kubectl get nodes
+          echo "=============================================="
+          echo "EKS NODES"
+          echo "=============================================="
+
+          kubectl get nodes -o wide
 
 
   # ==========================================================
-  # STAGE 5: DEPLOY TO EKS
+  # STAGE 5: DEPLOY APPLICATION TO EKS
   # ==========================================================
   deploy-to-eks:
     name: Deploy Application to EKS
@@ -173,29 +199,30 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --name ${{ env.EKS_CLUSTER_NAME }}
 
-
       # 2. Get container name
       - name: Get Container Name
         run: |
-          CONTAINER_NAME=$(kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} \
+          CONTAINER_NAME=$(kubectl get deployment \
+            ${{ env.K8S_DEPLOYMENT_NAME }} \
             -o jsonpath='{.spec.template.spec.containers[0].name}')
 
           echo "Container Name: $CONTAINER_NAME"
 
-          echo "CONTAINER_NAME=$CONTAINER_NAME" >> $GITHUB_ENV
-
+          echo "CONTAINER_NAME=$CONTAINER_NAME" >> "$GITHUB_ENV"
 
       # 3. Update deployment image
       - name: Update EKS Deployment
         run: |
           IMAGE="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
 
-          echo "Deploying image:"
+          echo "=============================================="
+          echo "DEPLOYING IMAGE"
+          echo "=============================================="
           echo "$IMAGE"
 
-          kubectl set image deployment/${{ env.K8S_DEPLOYMENT_NAME }} \
+          kubectl set image \
+            deployment/${{ env.K8S_DEPLOYMENT_NAME }} \
             $CONTAINER_NAME=$IMAGE
-
 
       # 4. Wait for rollout
       - name: Wait for Deployment Rollout
@@ -204,9 +231,18 @@ jobs:
             deployment/${{ env.K8S_DEPLOYMENT_NAME }} \
             --timeout=180s
 
+      # 5. Show deployment
+      - name: Verify Deployment
+        run: |
+          kubectl get deployment \
+            ${{ env.K8S_DEPLOYMENT_NAME }}
+
+          echo ""
+          kubectl get pods -o wide
+
 
   # ==========================================================
-  # STAGE 6: POST DEPLOYMENT
+  # STAGE 6: POST DEPLOYMENT VERIFICATION
   # ==========================================================
   post-deploy:
     name: Post Deployment Verification
@@ -222,7 +258,6 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --name ${{ env.EKS_CLUSTER_NAME }}
 
-
       # 2. Check deployment
       - name: Check Deployment
         run: |
@@ -230,8 +265,8 @@ jobs:
           echo "DEPLOYMENT STATUS"
           echo "=============================================="
 
-          kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }}
-
+          kubectl get deployment \
+            ${{ env.K8S_DEPLOYMENT_NAME }}
 
       # 3. Check pods
       - name: Check Pods
@@ -242,8 +277,7 @@ jobs:
 
           kubectl get pods -o wide
 
-
-      # 4. Check service
+      # 4. Check services
       - name: Check Service
         run: |
           echo "=============================================="
@@ -252,18 +286,28 @@ jobs:
 
           kubectl get svc
 
-
       # 5. Check rollout history
-      - name: Check Rollout
+      - name: Check Rollout History
         run: |
           echo "=============================================="
           echo "ROLLOUT HISTORY"
           echo "=============================================="
 
-          kubectl rollout history deployment/${{ env.K8S_DEPLOYMENT_NAME }}
+          kubectl rollout history \
+            deployment/${{ env.K8S_DEPLOYMENT_NAME }}
 
+      # 6. Check application pods
+      - name: Check Application
+        run: |
+          echo "=============================================="
+          echo "APPLICATION PODS"
+          echo "=============================================="
 
-      # 6. Final status
+          kubectl get pods \
+            -l app=${{ env.K8S_DEPLOYMENT_NAME }} \
+            -o wide || true
+
+      # 7. Final status
       - name: Deployment Completed
         run: |
           echo ""
@@ -271,13 +315,17 @@ jobs:
           echo "   EKS DEPLOYMENT COMPLETED SUCCESSFULLY"
           echo "=============================================="
           echo ""
+
           echo "Cluster:"
           echo "${{ env.EKS_CLUSTER_NAME }}"
+
           echo ""
           echo "ECR Image:"
           echo "${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+
           echo ""
           echo "Deployment:"
           echo "${{ env.K8S_DEPLOYMENT_NAME }}"
+
           echo ""
           echo "Status: SUCCESS"
